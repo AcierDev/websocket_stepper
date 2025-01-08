@@ -2,12 +2,18 @@
 
 #include <algorithm>  // For std::min and std::max
 
+MotorControl* MotorControl::instance = nullptr;
+
 MotorControl::MotorControl(int pulsePin1, int dirPin1, int pulsePin2,
                            int dirPin2, int endstopPin1, int endstopPin2)
-    : stepper1(1, pulsePin1, dirPin1),
-      stepper2(1, pulsePin2, dirPin2),
+    : stepperY(1, pulsePin1, dirPin1),
+      stepperX(1, pulsePin2, dirPin2),
       _endstopPin1(endstopPin1),
-      _endstopPin2(endstopPin2) {}
+      _endstopPin2(endstopPin2) {
+  instance = this;  // Store instance pointer for timer callback
+}
+
+void IRAM_ATTR MotorControl::onXMoveTimer() { instance->_xMoveReady = true; }
 
 void MotorControl::setup() {
   // Configure endstops with Bounce2
@@ -26,20 +32,32 @@ void MotorControl::setup() {
   extensionState = false;
 
   // Set parameters for both motors
-  stepper1.setMaxSpeed(20000);
-  stepper1.setAcceleration(20000);
-  stepper1.setSpeed(20000);
-  stepper1.setMinPulseWidth(3);
+  stepperY.setMaxSpeed(20000);
+  stepperY.setAcceleration(20000);
+  stepperY.setSpeed(20000);
+  stepperY.setMinPulseWidth(3);
 
-  stepper2.setMaxSpeed(20000);
-  stepper2.setAcceleration(20000);
-  stepper2.setSpeed(20000);
-  stepper2.setMinPulseWidth(3);
+  stepperX.setMaxSpeed(20000);
+  stepperX.setAcceleration(20000);
+  stepperX.setSpeed(20000);
+  stepperX.setMinPulseWidth(3);
+
+  // Initialize hardware timer
+  xMoveTimer = timerBegin(0, 80, true);  // Timer 0, prescaler 80, count up
+  timerAttachInterrupt(xMoveTimer, &onXMoveTimer, true);
+  timerAlarmWrite(xMoveTimer, 150000, false);  // 150ms (in microseconds)
 }
 
-void MotorControl::runMotors() {
-  stepper1.run();
-  stepper2.run();
+void IRAM_ATTR MotorControl::runMotors() {
+  stepperY.run();
+
+  if (_delayedXMove && _xMoveReady) {
+    _delayedXMove = false;
+    _xMoveReady = false;
+    stepperX.moveTo(_xMoveSteps);
+  }
+
+  stepperX.run();
   endstop1.update();
   endstop2.update();
 }
@@ -51,7 +69,7 @@ void MotorControl::moveMotor(int motorNum, long steps) {
 
   // Get current position in steps
   long currentPos =
-      (motorNum == 1) ? stepper1.currentPosition() : stepper2.currentPosition();
+      (motorNum == 1) ? stepperY.currentPosition() : stepperX.currentPosition();
 
   // Calculate target position after move
   long targetPos = currentPos + steps;
@@ -71,14 +89,15 @@ void MotorControl::moveMotor(int motorNum, long steps) {
   }
 
   if (motorNum == 1) {
-    stepper1.move(steps);
+    stepperY.move(steps);
   } else if (motorNum == 2) {
-    stepper2.move(steps);
+    stepperX.move(steps);
   }
 }
 
 void MotorControl::homeMotor(int motorNum) {
-  AccelStepper& stepper = (motorNum == 1) ? stepper1 : stepper2;
+  // This single-motor homing function can remain as a backup
+  AccelStepper& stepper = (motorNum == 1) ? stepperY : stepperX;
   int endstopPin = (motorNum == 1) ? _endstopPin1 : _endstopPin2;
 
   // Save current speed settings
@@ -98,12 +117,6 @@ void MotorControl::homeMotor(int motorNum) {
     } else {
       consecutiveHighs = 0;  // Reset counter if we get a LOW reading
     }
-    // if (consecutiveHighs > 1) {
-    //   Serial.print("End stop Value: ");
-    //   Serial.println(digitalRead(endstopPin));
-    //   Serial.print("Consecutive Highs: ");
-    //   Serial.println(consecutiveHighs);
-    // }
     stepper.run();
   }
 
@@ -119,6 +132,77 @@ void MotorControl::homeMotor(int motorNum) {
   // Restore original speed settings
   stepper.setMaxSpeed(currentSpeed);
   stepper.setAcceleration(currentAccel);
+}
+
+void MotorControl::homeMotors() {
+  // Save current speeds
+  float currentSpeedY = stepperY.maxSpeed();
+  float currentAccelY = stepperY.acceleration();
+  float currentSpeedX = stepperX.maxSpeed();
+  float currentAccelX = stepperX.acceleration();
+
+  // Set homing speeds
+  stepperY.setMaxSpeed(2000);
+  stepperY.setAcceleration(20000);
+  stepperX.setMaxSpeed(2000);
+  stepperX.setAcceleration(20000);
+
+  // Start moving both motors towards home
+  stepperY.moveTo(-1000000);
+  stepperX.moveTo(-1000000);
+
+  bool yHomed = false;
+  bool xHomed = false;
+  int consecutiveHighsY = 0;
+  int consecutiveHighsX = 0;
+
+  // Run both motors until both hit their endstops
+  while (!yHomed || !xHomed) {
+    if (!yHomed) {
+      if (digitalRead(_endstopPin1) == HIGH) {
+        consecutiveHighsY++;
+        if (consecutiveHighsY >= 7) {
+          stepperY.stop();
+          stepperY.setCurrentPosition(0);
+          yHomed = true;
+          Serial.println("Y axis homed");
+        }
+      } else {
+        consecutiveHighsY = 0;
+        stepperY.run();
+      }
+    }
+
+    if (!xHomed) {
+      if (digitalRead(_endstopPin2) == HIGH) {
+        consecutiveHighsX++;
+        if (consecutiveHighsX >= 7) {
+          stepperX.stop();
+          stepperX.setCurrentPosition(0);
+          xHomed = true;
+          Serial.println("X axis homed");
+        }
+      } else {
+        consecutiveHighsX = 0;
+        stepperX.run();
+      }
+    }
+  }
+
+  // Move both axes away from endstops
+  stepperY.moveTo(100);
+  stepperX.moveTo(100);
+
+  while (stepperY.distanceToGo() != 0 || stepperX.distanceToGo() != 0) {
+    stepperY.run();
+    stepperX.run();
+  }
+
+  // Restore original speeds
+  stepperY.setMaxSpeed(currentSpeedY);
+  stepperY.setAcceleration(currentAccelY);
+  stepperX.setMaxSpeed(currentSpeedX);
+  stepperX.setAcceleration(currentAccelX);
 }
 
 void MotorControl::moveToPosition(int motorNum, long position) {
@@ -141,9 +225,9 @@ void MotorControl::moveToPosition(int motorNum, long position) {
   }
 
   if (motorNum == 1) {
-    stepper1.moveTo(position);
+    stepperY.moveTo(position);
   } else if (motorNum == 2) {
-    stepper2.moveTo(position);
+    stepperX.moveTo(position);
   }
 }
 
@@ -152,7 +236,7 @@ void MotorControl::togglePattern(int motorNum) {
     if (_pattern1Running) {
       _pattern1Running = false;
       _pattern1Step = 0;
-      stepper1.stop();
+      stepperY.stop();
     } else {
       _pattern1Running = true;
       _pattern1Step = 0;
@@ -163,7 +247,7 @@ void MotorControl::togglePattern(int motorNum) {
     if (_pattern2Running) {
       _pattern2Running = false;
       _pattern2Step = 0;
-      stepper2.stop();
+      stepperX.stop();
     } else {
       _pattern2Running = true;
       _pattern2Step = 0;
@@ -220,10 +304,10 @@ void MotorControl::startPattern(int rows, int cols, double startX,
   patternState = PatternState::IDLE;
 
   // Update motor speeds
-  stepper1.setMaxSpeed(speed);
-  stepper2.setMaxSpeed(speed);
-  stepper1.setAcceleration(acceleration);
-  stepper2.setAcceleration(acceleration);
+  stepperY.setMaxSpeed(speed);
+  stepperX.setMaxSpeed(speed);
+  stepperY.setAcceleration(acceleration);
+  stepperX.setAcceleration(acceleration);
 }
 
 void MotorControl::stopPattern() {
@@ -231,8 +315,8 @@ void MotorControl::stopPattern() {
   patternState = PatternState::IDLE;
   currentPatternIndex = 0;
   // Stop any ongoing movement
-  stepper1.stop();
-  stepper2.stop();
+  stepperY.stop();
+  stepperX.stop();
 }
 
 void MotorControl::runPattern() {
@@ -240,7 +324,7 @@ void MotorControl::runPattern() {
     return;
   }
 
-  if (stepper1.distanceToGo() != 0 || stepper2.distanceToGo() != 0) {
+  if (stepperY.distanceToGo() != 0 || stepperX.distanceToGo() != 0) {
     return;
   }
 
@@ -268,25 +352,24 @@ void MotorControl::runPattern() {
       patternState = PatternState::PLACING;
       break;
 
-    case PatternState::PLACING:
+    case PatternState::PLACING: {
+      // Check if we're in the last row (closest to pickup)
+      bool isLastRow =
+          currentPatternIndex >= (currentPattern.size() - patternCols);
+
+      if (isLastRow) {
+        delay(300);  // Additional delay for last row
+      }
+
       currentPatternIndex++;
 
       if (currentPatternIndex >= currentPattern.size()) {
         patternActive = false;
         currentPatternIndex = 0;
-        patternState = PatternState::IDLE;
       } else {
-        // Calculate current row based on pattern index and columns
-        int currentRow = currentPatternIndex / patternCols;
-
-        // If we're in the last row, add a delay
-        if (currentRow == patternRows - 1) {
-          delay(300);
-        }
-
         patternState = PatternState::IDLE;
       }
-      break;
+    } break;
   }
 }
 
@@ -299,8 +382,8 @@ long MotorControl::coordToSteps(double coord) {
 void MotorControl::gotoPosition(double x, double y, float speed,
                                 float acceleration) {
   // Get current positions in steps
-  long currentYSteps = stepper1.currentPosition();
-  long currentXSteps = stepper2.currentPosition();
+  long currentYSteps = stepperY.currentPosition();
+  long currentXSteps = stepperX.currentPosition();
 
   // Get current positions in coordinates
   double currentX = currentXSteps / STEPS_PER_UNIT;
@@ -318,13 +401,33 @@ void MotorControl::gotoPosition(double x, double y, float speed,
   long xSteps = coordToSteps(targetX);
   long ySteps = coordToSteps(targetY);
 
-  stepper1.setMaxSpeed(speed);
-  stepper2.setMaxSpeed(speed);
-  stepper1.setAcceleration(acceleration);
-  stepper2.setAcceleration(acceleration);
+  // Set speeds and accelerations
+  stepperY.setMaxSpeed(speed);
+  stepperX.setMaxSpeed(speed);
+  stepperY.setAcceleration(acceleration);
+  stepperX.setAcceleration(acceleration);
 
-  stepper1.moveTo(ySteps);
-  stepper2.moveTo(xSteps);
+  // Check if we're moving to pickup position
+  bool movingToPickup =
+      (patternState == PatternState::IDLE && abs(x - pickupPosition.x) < 0.1 &&
+       abs(y - pickupPosition.y) < 0.1);
+
+  if (movingToPickup) {
+    // Start Y movement immediately
+    stepperY.moveTo(ySteps);
+
+    // Set up delayed X movement using hardware timer
+    _delayedXMove = true;
+    _xMoveReady = false;
+    _xMoveSteps = xSteps;
+    timerRestart(xMoveTimer);  // Reset and start the timer
+    timerAlarmEnable(xMoveTimer);
+  } else {
+    // For all other movements, move both axes simultaneously
+    _delayedXMove = false;
+    stepperY.moveTo(ySteps);
+    stepperX.moveTo(xSteps);
+  }
 }
 
 void MotorControl::setSuction(bool state) {
@@ -349,12 +452,13 @@ void MotorControl::pick() {
 
 void MotorControl::place() {
   setExtension(true);
-  delay(300);
+  delay(100);
 
   setSuction(false);
   delay(100);
 
   setExtension(false);
+  delay(100);
 }
 
 void MotorControl::runStressTest() {
@@ -362,7 +466,7 @@ void MotorControl::runStressTest() {
     return;
   }
 
-  if (stepper1.distanceToGo() != 0 || stepper2.distanceToGo() != 0) {
+  if (stepperY.distanceToGo() != 0 || stepperX.distanceToGo() != 0) {
     return;
   }
 
@@ -404,6 +508,6 @@ void MotorControl::stopStressTest() {
   stressTestActive = false;
   stressTestCount = 0;
   patternState = PatternState::IDLE;
-  stepper1.stop();
-  stepper2.stop();
+  stepperY.stop();
+  stepperX.stop();
 }

@@ -5,7 +5,13 @@
 #include <Arduino.h>
 #include <Bounce2.h>
 
+#include "esp32-hal-timer.h"
 #include "pattern_generator.h"
+
+struct PatternPoint {
+  long stepsX;
+  long stepsY;
+};
 
 class MotorControl {
  public:
@@ -15,6 +21,7 @@ class MotorControl {
   void runMotors();
   void moveMotor(int motorNum, long steps);
   void homeMotor(int motorNum);
+  void homeMotors();
   void moveToPosition(int motorNum, long position);
   void motorPattern();
   void togglePattern(int motorNum);
@@ -55,8 +62,8 @@ class MotorControl {
   Point pickupPosition;  // Replace the const PICKUP_POSITION
 
  private:
-  AccelStepper stepper1;
-  AccelStepper stepper2;
+  AccelStepper stepperY;
+  AccelStepper stepperX;
   int _endstopPin1;
   int _endstopPin2;
   static const long MAX_STEPS = 100000;
@@ -99,6 +106,16 @@ class MotorControl {
 
   float patternSpeed = 10000;  // Default speed
   float patternAccel = 10000;  // Default acceleration
+
+  bool _delayedXMove = false;
+  long _xMoveSteps = 0;
+  long _yStepsToStartX = 0;
+  unsigned long _moveStartTime = 0;  // For timing delayed X movements
+
+  hw_timer_t* xMoveTimer = NULL;
+  static void IRAM_ATTR onXMoveTimer();
+  volatile bool _xMoveReady = false;
+  static MotorControl* instance;  // Needed for timer callback
 };
 
 #endif

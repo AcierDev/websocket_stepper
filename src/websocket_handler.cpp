@@ -43,6 +43,8 @@ void WebSocketHandler::handleWebSocketMessage(void* arg, uint8_t* data,
     } else if (message.startsWith("moveX ")) {
       int steps = message.substring(6).toInt();
       _motorControl.moveMotor(2, steps);
+    } else if (message == "home") {
+      _motorControl.homeMotors();
     } else if (message == "homeY") {
       _motorControl.homeMotor(1);
     } else if (message == "homeX") {

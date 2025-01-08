@@ -577,7 +577,7 @@ const char index_html[] PROGMEM = R"rawliteral(
                 <div class="control-group">
                     <label>
                         Start X
-                        <input type="number" id="startX" value="3" step="0.5">
+                        <input type="number" id="startX" value="2" step="0.5">
                     </label>
                     <label>
                         Start Y
